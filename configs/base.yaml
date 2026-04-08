@@ -21,11 +21,10 @@ data:
     SST: SST_2019-2026.npy
     U: U_2019-2026.npy
     V: V_2019-2026.npy
-    LHFLX: LHFLX_2019-2026.npy
-    SHFLX: SHFLX_2019-2026.npy
-    QNET: QNET_2019-2026.npy
+    LATENT: LATENT_2019-2026.npy
+    SENSIBLE: SENSIBLE_2019-2026.npy
   channels: [SST, U, V, LAT, LON]
-  target_key: LHFLX
+  target_key: LATENT
   target_mode: absolute
   input_window: 30
   horizons: [3, 7, 14]
