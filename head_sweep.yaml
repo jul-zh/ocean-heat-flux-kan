@@ -1,0 +1,7 @@
+base_config: configs/base.yaml
+heads:
+  - conv_det
+  - mlp_det
+  - rbf_kan_det
+  - conv_gauss
+  - rbf_kan_gauss
