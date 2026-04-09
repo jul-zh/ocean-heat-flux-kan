@@ -28,6 +28,24 @@ class Standardizer:
         return (x - self.mean[None, :, None, None]) / (self.std[None, :, None, None] + 1e-6)
 
 
+class TargetScaler:
+    def __init__(self, mean: np.ndarray, std: np.ndarray):
+        mean = np.asarray(mean, dtype=np.float32)
+        std = np.asarray(std, dtype=np.float32)
+        if mean.ndim == 0:
+            mean = mean[None]
+        if std.ndim == 0:
+            std = std[None]
+        self.mean = mean
+        self.std = np.where(std > 1e-6, std, 1.0).astype(np.float32)
+
+    def transform(self, y: np.ndarray) -> np.ndarray:
+        return (y - self.mean[:, None, None]) / (self.std[:, None, None] + 1e-6)
+
+    def inverse_transform(self, y: np.ndarray) -> np.ndarray:
+        return y * (self.std[:, None, None] + 1e-6) + self.mean[:, None, None]
+
+
 def load_mask(mask_path: str, grid: GridSpec) -> np.ndarray:
     grid_size = grid.height * grid.width
     with open(mask_path, "rb") as f:
@@ -93,6 +111,47 @@ def compute_channel_stats_with_coords(
     return np.array(means, dtype=np.float32), np.array(stds, dtype=np.float32)
 
 
+def _candidate_indices(total_time: int, input_window: int, max_h: int) -> np.ndarray:
+    return np.arange(input_window, total_time - max_h + 1)
+
+
+def compute_target_stats(
+    data_dict: Dict[str, np.ndarray],
+    target_key: str,
+    target_mode: str,
+    horizons: Sequence[int],
+    mask_2d: np.ndarray,
+    train_candidate_indices: Sequence[int],
+) -> tuple[np.ndarray, np.ndarray]:
+    ocean = mask_2d == 1
+    arr = data_dict[target_key]
+    means, stds = [], []
+
+    for h in horizons:
+        vals_per_t = []
+        for t in train_candidate_indices:
+            future = arr[t + h - 1]
+            if target_mode == "delta":
+                base = arr[t - 1]
+                sample = future - base
+            elif target_mode == "absolute":
+                sample = future
+            else:
+                raise ValueError(f"Unsupported target_mode={target_mode}")
+            vals = sample[ocean]
+            vals = vals[~np.isnan(vals)]
+            if vals.size:
+                vals_per_t.append(vals)
+
+        merged = np.concatenate(vals_per_t, axis=0)
+        mean = merged.mean()
+        std = merged.std()
+        means.append(mean)
+        stds.append(std if std > 1e-6 else 1.0)
+
+    return np.asarray(means, dtype=np.float32), np.asarray(stds, dtype=np.float32)
+
+
 class ERA5FluxDataset(Dataset):
     def __init__(
         self,
@@ -103,12 +162,13 @@ class ERA5FluxDataset(Dataset):
         lat_grid: np.ndarray,
         lon_grid: np.ndarray,
         target_key: str,
-        target_mode: str = "absolute",
+        target_mode: str = "delta",
         input_window: int = 30,
-        horizons: Sequence[int] = (3, 7, 14),
+        horizons: Sequence[int] = tuple(range(1, 15)),
         split_start: str | None = None,
         split_end: str | None = None,
         standardizer: Standardizer | None = None,
+        target_scaler: TargetScaler | None = None,
     ):
         self.data_dict = data_dict
         self.mask_2d = mask_2d.astype(np.float32)
@@ -122,9 +182,10 @@ class ERA5FluxDataset(Dataset):
         self.horizons = list(horizons)
         self.max_h = max(horizons)
         self.standardizer = standardizer
+        self.target_scaler = target_scaler
 
         total_time = len(dates)
-        all_candidate_indices = np.arange(input_window, total_time - self.max_h + 1)
+        all_candidate_indices = _candidate_indices(total_time, input_window, self.max_h)
 
         split_start_ts = pd.Timestamp(split_start) if split_start is not None else dates[0]
         split_end_ts = pd.Timestamp(split_end) if split_end is not None else dates[-1]
@@ -162,18 +223,24 @@ class ERA5FluxDataset(Dataset):
                 y_list.append(future_target)
             else:
                 raise ValueError(f"Unsupported target_mode={self.target_mode}")
-        y = np.stack(y_list, axis=0)
+        y_raw = np.stack(y_list, axis=0).astype(np.float32)
 
         if self.standardizer is not None:
             x = self.standardizer.transform(x)
+        if self.target_scaler is not None:
+            y = self.target_scaler.transform(y_raw)
+        else:
+            y = y_raw.copy()
 
         x = replace_nan_with_zero(x)
         y = replace_nan_with_zero(y)
+        y_raw = replace_nan_with_zero(y_raw)
         current_target = replace_nan_with_zero(current_target)
 
         return {
             "x": torch.from_numpy(x).float(),
             "y": torch.from_numpy(y).float(),
+            "y_raw": torch.from_numpy(y_raw).float(),
             "current_target": torch.from_numpy(current_target).float(),
             "mask": torch.from_numpy(self.mask_2d).float(),
             "date": str(self.dates[t].date()),
@@ -189,13 +256,24 @@ def build_dataloaders(config: dict):
     file_map = data_cfg["file_map"]
     mask = load_mask(os.path.join(data_dir, data_cfg["mask_filename"]), grid)
     data = load_all_data(data_dir, file_map, grid)
-    dates = pd.date_range(start=data_cfg["date_range"]["start"], end=data_cfg["date_range"]["end"], freq="D")
+    dates = pd.date_range(
+        start=pd.Timestamp(data_cfg["date_range"]["start"]),
+        end=pd.Timestamp(data_cfg["date_range"]["end"]),
+        freq="D",
+    )
 
     for key in data:
         assert data[key].shape[0] == len(dates), f"{key}: time mismatch"
 
+    split_cfg = data_cfg["split"]
+    train_end_ts = pd.Timestamp(split_cfg["train_end"])
+    val_start_ts = pd.Timestamp(split_cfg["val_start"])
+    val_end_ts = pd.Timestamp(split_cfg["val_end"])
+    test_start_ts = pd.Timestamp(split_cfg["test_start"])
+    test_end_ts = pd.Timestamp(split_cfg["test_end"])
+
     lat_grid, lon_grid = make_lat_lon_channels(grid)
-    train_last_idx_exclusive = dates.get_loc(data_cfg["split"]["val_start"])
+    train_last_idx_exclusive = dates.get_loc(val_start_ts)
 
     x_mean, x_std = compute_channel_stats_with_coords(
         data_dict=data,
@@ -206,6 +284,18 @@ def build_dataloaders(config: dict):
         lon_grid=lon_grid,
     )
     standardizer = Standardizer(x_mean, x_std)
+
+    all_candidates = _candidate_indices(len(dates), data_cfg["input_window"], max(data_cfg["horizons"]))
+    train_candidate_indices = [t for t in all_candidates if dates[t] <= train_end_ts]
+    target_mean, target_std = compute_target_stats(
+        data_dict=data,
+        target_key=data_cfg["target_key"],
+        target_mode=data_cfg["target_mode"],
+        horizons=data_cfg["horizons"],
+        mask_2d=mask,
+        train_candidate_indices=train_candidate_indices,
+    )
+    target_scaler = TargetScaler(target_mean, target_std)
 
     ds_kwargs = dict(
         data_dict=data,
@@ -219,15 +309,16 @@ def build_dataloaders(config: dict):
         input_window=data_cfg["input_window"],
         horizons=data_cfg["horizons"],
         standardizer=standardizer,
+        target_scaler=target_scaler if data_cfg.get("normalize_target", True) else None,
     )
 
     train_ds = ERA5FluxDataset(
         **ds_kwargs,
         split_start=str(pd.Timestamp(data_cfg["date_range"]["start"]) + pd.Timedelta(days=data_cfg["input_window"])),
-        split_end=data_cfg["split"]["train_end"],
+        split_end=str(train_end_ts),
     )
-    val_ds = ERA5FluxDataset(**ds_kwargs, split_start=data_cfg["split"]["val_start"], split_end=data_cfg["split"]["val_end"])
-    test_ds = ERA5FluxDataset(**ds_kwargs, split_start=data_cfg["split"]["test_start"], split_end=data_cfg["split"]["test_end"])
+    val_ds = ERA5FluxDataset(**ds_kwargs, split_start=str(val_start_ts), split_end=str(val_end_ts))
+    test_ds = ERA5FluxDataset(**ds_kwargs, split_start=str(test_start_ts), split_end=str(test_end_ts))
 
     loader_kwargs = dict(batch_size=train_cfg["batch_size"], num_workers=train_cfg["num_workers"])
     train_loader = DataLoader(train_ds, shuffle=True, **loader_kwargs)
@@ -238,6 +329,9 @@ def build_dataloaders(config: dict):
         "mask": mask,
         "dates": dates,
         "standardizer": standardizer,
+        "target_scaler": target_scaler,
+        "target_mean": target_mean,
+        "target_std": target_std,
         "lat_grid": lat_grid,
         "lon_grid": lon_grid,
     }

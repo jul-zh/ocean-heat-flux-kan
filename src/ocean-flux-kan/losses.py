@@ -4,7 +4,6 @@ import math
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class MaskedMAELoss(nn.Module):
@@ -14,22 +13,30 @@ class MaskedMAELoss(nn.Module):
         return diff.sum() / (mask.sum() * pred.shape[1] + 1e-8)
 
 
-class MaskedMSELoss(nn.Module):
+class MaskedHuberLoss(nn.Module):
+    def __init__(self, delta: float = 1.0):
+        super().__init__()
+        self.delta = delta
+
     def forward(self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         mask = mask.float().unsqueeze(1)
-        diff = ((pred - target) ** 2) * mask
-        return diff.sum() / (mask.sum() * pred.shape[1] + 1e-8)
+        err = torch.abs(pred - target)
+        quad = torch.minimum(err, torch.tensor(self.delta, device=pred.device))
+        lin = err - quad
+        loss = 0.5 * quad.pow(2) + self.delta * lin
+        loss = loss * mask
+        return loss.sum() / (mask.sum() * pred.shape[1] + 1e-8)
 
 
-class CombinedLoss(nn.Module):
-    def __init__(self, alpha: float = 0.7):
+class CombinedDeterministicLoss(nn.Module):
+    def __init__(self, mae_weight: float = 0.5, huber_delta: float = 1.0):
         super().__init__()
-        self.alpha = alpha
+        self.mae_weight = mae_weight
         self.mae = MaskedMAELoss()
-        self.mse = MaskedMSELoss()
+        self.huber = MaskedHuberLoss(delta=huber_delta)
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        return self.alpha * self.mae(pred, target, mask) + (1 - self.alpha) * self.mse(pred, target, mask)
+        return self.mae_weight * self.mae(pred, target, mask) + (1.0 - self.mae_weight) * self.huber(pred, target, mask)
 
 
 class MaskedGaussianNLLLoss(nn.Module):
@@ -51,14 +58,11 @@ class MaskedGaussianNLLLoss(nn.Module):
 def get_loss(head_name: str, config: dict) -> nn.Module:
     if head_name.endswith("_gauss"):
         return MaskedGaussianNLLLoss(aux_mae_weight=config["loss"]["gaussian_aux_mae_weight"])
-    return CombinedLoss(alpha=config["loss"]["deterministic_alpha"])
+    return CombinedDeterministicLoss(
+        mae_weight=config["loss"].get("deterministic_mae_weight", 0.5),
+        huber_delta=config["loss"].get("deterministic_huber_delta", 1.0),
+    )
 
 
 def is_probabilistic_head(head_name: str) -> bool:
     return head_name.endswith("_gauss")
-
-
-def unpack_prediction(pred, probabilistic: bool):
-    if probabilistic:
-        return pred["mu"], pred["sigma"]
-    return pred["pred"]
