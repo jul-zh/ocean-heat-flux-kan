@@ -15,10 +15,22 @@ from ocean_flux_kan.train import run_experiment
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/head_sweep.yaml")
+    parser.add_argument("--data-dir", type=str, default=None)
+    parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--target-key", type=str, default=None)
+    parser.add_argument("--target-mode", type=str, default=None)
     args = parser.parse_args()
 
     sweep_cfg = load_yaml(args.config)
     base_cfg = load_yaml(sweep_cfg["base_config"])
+    if args.data_dir is not None:
+        base_cfg["data"]["data_dir"] = args.data_dir
+    if args.output_dir is not None:
+        base_cfg["data"]["output_dir"] = args.output_dir
+    if args.target_key is not None:
+        base_cfg["data"]["target_key"] = args.target_key
+    if args.target_mode is not None:
+        base_cfg["data"]["target_mode"] = args.target_mode
 
     results = []
     for head in sweep_cfg["heads"]:
@@ -34,10 +46,10 @@ def main():
             }
         )
 
-    out_path = Path(base_cfg["data"]["output_dir"]) / f"{base_cfg['data']['target_key'].lower()}_head_sweep_results.json"
+    out_path = Path(base_cfg["data"]["output_dir"]) / f"{base_cfg['data']['target_key'].lower()}_{base_cfg['data']['target_mode']}_head_sweep_results.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
+        json.dump(results, f, indent=2, default=str)
     print(f"Saved sweep results to {out_path}")
 
 

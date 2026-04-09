@@ -18,6 +18,8 @@ def main():
     parser.add_argument("--head", type=str, required=True)
     parser.add_argument("--target-key", type=str, default=None)
     parser.add_argument("--target-mode", type=str, default=None)
+    parser.add_argument("--data-dir", type=str, default=None)
+    parser.add_argument("--output-dir", type=str, default=None)
     args = parser.parse_args()
 
     config = load_yaml(args.config)
@@ -25,6 +27,10 @@ def main():
         config["data"]["target_key"] = args.target_key
     if args.target_mode is not None:
         config["data"]["target_mode"] = args.target_mode
+    if args.data_dir is not None:
+        config["data"]["data_dir"] = args.data_dir
+    if args.output_dir is not None:
+        config["data"]["output_dir"] = args.output_dir
     config["model"]["head"] = args.head
 
     _, best_val, test_metrics, experiment_dir = run_experiment(config, args.head)
@@ -34,7 +40,7 @@ def main():
         "test_metrics": test_metrics,
         "experiment_dir": experiment_dir,
     }
-    print(json.dumps(result, indent=2))
+    print(json.dumps(result, indent=2, default=str))
 
 
 if __name__ == "__main__":
