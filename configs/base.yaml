@@ -9,30 +9,31 @@ data:
     height: 161
     width: 181
   date_range:
-    start: 2019-01-01
-    end: 2025-10-31
+    start: "2019-01-01"
+    end: "2025-10-31"
   split:
-    train_end: 2023-12-31
-    val_start: 2024-01-01
-    val_end: 2024-12-31
-    test_start: 2025-01-01
-    test_end: 2025-10-17
+    train_end: "2023-12-31"
+    val_start: "2024-01-01"
+    val_end: "2024-12-31"
+    test_start: "2025-01-01"
+    test_end: "2025-10-17"
   file_map:
     SST: SST_2019-2026.npy
     U: U_2019-2026.npy
     V: V_2019-2026.npy
-    LATENT: LATENT_2019-2026.npy
-    SENSIBLE: SENSIBLE_2019-2026.npy
+    LATENT: LATENT.npy
+    SENSIBLE: SENSIBLE.npy
   channels: [SST, U, V, LAT, LON]
   target_key: LATENT
-  target_mode: absolute
+  target_mode: delta
+  normalize_target: true
   input_window: 30
-  horizons: [3, 7, 14]
+  horizons: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
 
 train:
   batch_size: 4
-  epochs: 12
-  lr: 5.0e-5
+  epochs: 10
+  lr: 1.0e-4
   weight_decay: 1.0e-4
   num_workers: 0
   device: cuda
@@ -46,7 +47,8 @@ model:
     dropout: 0.0
 
 loss:
-  deterministic_alpha: 0.7
+  deterministic_mae_weight: 0.6
+  deterministic_huber_delta: 1.0
   gaussian_aux_mae_weight: 0.1
 
 logging:
